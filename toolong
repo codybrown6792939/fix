@@ -1,0 +1,403 @@
+Index: headless/app/headless_shell.cc
+diff --git a/headless/app/headless_shell.cc b/headless/app/headless_shell.cc
+index e2d6348cf4285589d62c1a61f0ce7f2c113cf190..1031dbd5446b78a4fa95d7981971fc1a9faca677 100644
+--- a/headless/app/headless_shell.cc
++++ b/headless/app/headless_shell.cc
+@@ -37,8 +37,6 @@ class HeadlessShell : public HeadlessWebContents::Observer {
+ 
+   void OnStart(HeadlessBrowser* browser) {
+     browser_ = browser;
+-    web_contents_ = browser->CreateWebContents(gfx::Size(800, 600));
+-    web_contents_->AddObserver(this);
+ 
+     base::CommandLine::StringVector args =
+         base::CommandLine::ForCurrentProcess()->GetArgs();
+@@ -50,11 +48,13 @@ class HeadlessShell : public HeadlessWebContents::Observer {
+     } else {
+       url = GURL(args[0]);
+     }
+-    if (!web_contents_->OpenURL(url)) {
++    web_contents_ = browser->CreateWebContents(url, gfx::Size(800, 600));
++    if (!web_contents_) {
+       LOG(ERROR) << "Navigation failed";
+-      web_contents_ = nullptr;
+       browser_->Shutdown();
++      return;
+     }
++    web_contents_->AddObserver(this);
+   }
+ 
+   void ShutdownIfNeeded() {
+@@ -71,8 +71,6 @@ class HeadlessShell : public HeadlessWebContents::Observer {
+     ShutdownIfNeeded();
+   }
+ 
+-  void DidFinishNavigation(bool success) override {}
+-
+  private:
+   HeadlessBrowser* browser_;  // Not owned.
+   std::unique_ptr<HeadlessWebContents> web_contents_;
+Index: headless/lib/browser/headless_browser_impl.cc
+diff --git a/headless/lib/browser/headless_browser_impl.cc b/headless/lib/browser/headless_browser_impl.cc
+index 77f463d8caa04484e52b22f22375fbad7943bfed..57564d7ddc8828994e61fb7eaa84003b5e88462a 100644
+--- a/headless/lib/browser/headless_browser_impl.cc
++++ b/headless/lib/browser/headless_browser_impl.cc
+@@ -31,10 +31,18 @@ HeadlessBrowserImpl::HeadlessBrowserImpl(
+ HeadlessBrowserImpl::~HeadlessBrowserImpl() {}
+ 
+ std::unique_ptr<HeadlessWebContents> HeadlessBrowserImpl::CreateWebContents(
++    const GURL& initial_url,
+     const gfx::Size& size) {
+   DCHECK(BrowserMainThread()->BelongsToCurrentThread());
+-  return base::WrapUnique(new HeadlessWebContentsImpl(
+-      browser_context(), window_tree_host_->window(), size));
++  std::unique_ptr<HeadlessWebContentsImpl> web_contents =
++      base::WrapUnique(new HeadlessWebContentsImpl(
++          browser_context(), window_tree_host_->window(), size));
++  // We require the user to pass in an initial URL to ensure that the renderer
++  // gets initialized and eventually becomes ready to be inspected. See
++  // HeadlessWebContents::Observer::WebContentsReady.
++  if (!web_contents->OpenURL(initial_url))
++    return nullptr;
++  return std::move(web_contents);
+ }
+ 
+ scoped_refptr<base::SingleThreadTaskRunner>
+Index: headless/lib/browser/headless_browser_impl.h
+diff --git a/headless/lib/browser/headless_browser_impl.h b/headless/lib/browser/headless_browser_impl.h
+index 3a4abd3277701980557de7a939807bc49b93c537..eadeb56b64d8834a2b3930f6b944d1dd1500dd86 100644
+--- a/headless/lib/browser/headless_browser_impl.h
++++ b/headless/lib/browser/headless_browser_impl.h
+@@ -30,6 +30,7 @@ class HeadlessBrowserImpl : public HeadlessBrowser {
+ 
+   // HeadlessBrowser implementation:
+   std::unique_ptr<HeadlessWebContents> CreateWebContents(
++      const GURL& initial_url,
+       const gfx::Size& size) override;
+   scoped_refptr<base::SingleThreadTaskRunner> BrowserMainThread()
+       const override;
+Index: headless/lib/browser/headless_web_contents_impl.cc
+diff --git a/headless/lib/browser/headless_web_contents_impl.cc b/headless/lib/browser/headless_web_contents_impl.cc
+index 04c00e54c63b539003f708d16da978e9ab01b65b..f58dfe0671c2b627794fc9b2540eb9624d134809 100644
+--- a/headless/lib/browser/headless_web_contents_impl.cc
++++ b/headless/lib/browser/headless_web_contents_impl.cc
+@@ -31,6 +31,8 @@ class WebContentsObserverAdapter : public content::WebContentsObserver {
+ 
+   ~WebContentsObserverAdapter() override {}
+ 
++  void RenderViewReady() override { observer_->WebContentsReady(); }
++
+   void DocumentOnLoadCompletedInMainFrame() override {
+     observer_->DocumentOnLoadCompletedInMainFrame();
+   }
+Index: headless/lib/browser/headless_web_contents_impl.h
+diff --git a/headless/lib/browser/headless_web_contents_impl.h b/headless/lib/browser/headless_web_contents_impl.h
+index 2bbaefff770a8b6267783064a6774d92bc799cbe..e1cdc2d1615b59ea3e11d5f88e5d76b93982234b 100644
+--- a/headless/lib/browser/headless_web_contents_impl.h
++++ b/headless/lib/browser/headless_web_contents_impl.h
+@@ -28,22 +28,19 @@ class WebContentsObserverAdapter;
+ 
+ class HeadlessWebContentsImpl : public HeadlessWebContents {
+  public:
++  HeadlessWebContentsImpl(content::BrowserContext* context,
++                          aura::Window* parent_window,
++                          const gfx::Size& initial_size);
+   ~HeadlessWebContentsImpl() override;
+ 
+   // HeadlessWebContents implementation:
+-  bool OpenURL(const GURL& url) override;
+   void AddObserver(Observer* observer) override;
+   void RemoveObserver(Observer* observer) override;
+ 
+   content::WebContents* web_contents() const;
++  bool OpenURL(const GURL& url);
+ 
+  private:
+-  friend class HeadlessBrowserImpl;
+-
+-  HeadlessWebContentsImpl(content::BrowserContext* context,
+-                          aura::Window* parent_window,
+-                          const gfx::Size& initial_size);
+-
+   class Delegate;
+   std::unique_ptr<Delegate> web_contents_delegate_;
+   std::unique_ptr<content::WebContents> web_contents_;
+Index: headless/lib/headless_browser_browsertest.cc
+diff --git a/headless/lib/headless_browser_browsertest.cc b/headless/lib/headless_browser_browsertest.cc
+index be3dffa20027ebd5db57c9de6c02ac3855b0736f..9cc594073cef0d6aa78bdb2c4ff4f8c6b55923ad 100644
+--- a/headless/lib/headless_browser_browsertest.cc
++++ b/headless/lib/headless_browser_browsertest.cc
+@@ -16,12 +16,19 @@ namespace headless {
+ 
+ IN_PROC_BROWSER_TEST_F(HeadlessBrowserTest, CreateAndDestroyWebContents) {
+   std::unique_ptr<HeadlessWebContents> web_contents =
+-      browser()->CreateWebContents(gfx::Size(800, 600));
++      browser()->CreateWebContents(GURL("about:blank"), gfx::Size(800, 600));
+   EXPECT_TRUE(web_contents);
+   // TODO(skyostil): Verify viewport dimensions once we can.
+   web_contents.reset();
+ }
+ 
++IN_PROC_BROWSER_TEST_F(HeadlessBrowserTest, CreateWithBadURL) {
++  GURL bad_url("not_valid");
++  std::unique_ptr<HeadlessWebContents> web_contents =
++      browser()->CreateWebContents(bad_url, gfx::Size(800, 600));
++  EXPECT_FALSE(web_contents);
++}
++
+ class HeadlessBrowserTestWithProxy : public HeadlessBrowserTest {
+  public:
+   HeadlessBrowserTestWithProxy()
+@@ -51,13 +58,13 @@ IN_PROC_BROWSER_TEST_F(HeadlessBrowserTestWithProxy, SetProxyServer) {
+   builder.SetProxyServer(proxy_server()->host_port_pair());
+   SetBrowserOptions(builder.Build());
+ 
+-  std::unique_ptr<HeadlessWebContents> web_contents =
+-      browser()->CreateWebContents(gfx::Size(800, 600));
+-
+   // Load a page which doesn't actually exist, but for which the our proxy
+   // returns valid content anyway.
+-  EXPECT_TRUE(NavigateAndWaitForLoad(
+-      web_contents.get(), GURL("http://not-an-actual-domain.tld/hello.html")));
++  std::unique_ptr<HeadlessWebContents> web_contents =
++      browser()->CreateWebContents(
++          GURL("http://not-an-actual-domain.tld/hello.html"),
++          gfx::Size(800, 600));
++  EXPECT_TRUE(WaitForLoad(web_contents.get()));
+ }
+ 
+ }  // namespace headless
+Index: headless/lib/headless_web_contents_browsertest.cc
+diff --git a/headless/lib/headless_web_contents_browsertest.cc b/headless/lib/headless_web_contents_browsertest.cc
+index 863bcdc1ce0ebacbbc40e5cca2fc864eb4d76f31..aaa5491882b03110142178172184bd9ff6f69123 100644
+--- a/headless/lib/headless_web_contents_browsertest.cc
++++ b/headless/lib/headless_web_contents_browsertest.cc
+@@ -16,19 +16,39 @@ namespace headless {
+ 
+ class HeadlessWebContentsTest : public HeadlessBrowserTest {};
+ 
++class NavigationObserver : public HeadlessWebContents::Observer {
++ public:
++  NavigationObserver(HeadlessWebContentsTest* browser_test)
++      : browser_test_(browser_test), navigation_succeeded_(false) {}
++  ~NavigationObserver() override {}
++
++  void DocumentOnLoadCompletedInMainFrame() override {
++    browser_test_->FinishAsynchronousTest();
++  }
++
++  void DidFinishNavigation(bool success) override {
++    navigation_succeeded_ = success;
++  }
++
++  bool navigation_succeeded() const { return navigation_succeeded_; }
++
++ private:
++  HeadlessWebContentsTest* browser_test_;  // Not owned.
++  bool navigation_succeeded_;
++};
++
+ IN_PROC_BROWSER_TEST_F(HeadlessWebContentsTest, Navigation) {
+   EXPECT_TRUE(embedded_test_server()->Start());
+   std::unique_ptr<HeadlessWebContents> web_contents =
+-      browser()->CreateWebContents(gfx::Size(800, 600));
+-  EXPECT_TRUE(NavigateAndWaitForLoad(
+-      web_contents.get(), embedded_test_server()->GetURL("/hello.html")));
+-}
++      browser()->CreateWebContents(
++          embedded_test_server()->GetURL("/hello.html"), gfx::Size(800, 600));
++  NavigationObserver observer(this);
++  web_contents->AddObserver(&observer);
+ 
+-IN_PROC_BROWSER_TEST_F(HeadlessWebContentsTest, NavigationWithBadURL) {
+-  std::unique_ptr<HeadlessWebContents> web_contents =
+-      browser()->CreateWebContents(gfx::Size(800, 600));
+-  GURL bad_url("not_valid");
+-  EXPECT_FALSE(web_contents->OpenURL(bad_url));
++  RunAsynchronousTest();
++
++  EXPECT_TRUE(observer.navigation_succeeded());
++  web_contents->RemoveObserver(&observer);
+ }
+ 
+ }  // namespace headless
+Index: headless/public/headless_browser.h
+diff --git a/headless/public/headless_browser.h b/headless/public/headless_browser.h
+index 75394078f87d3fb90d170d7acf69a5c9fb60fa0d..367a8384fec3957b274be81238ed40eaeebc4927 100644
+--- a/headless/public/headless_browser.h
++++ b/headless/public/headless_browser.h
+@@ -35,8 +35,10 @@ class HEADLESS_EXPORT HeadlessBrowser {
+  public:
+   struct Options;
+ 
+-  // Create a new browser tab. |size| is in physical pixels.
++  // Create a new browser tab which navigates to |initial_url|. |size| is in
++  // physical pixels.
+   virtual std::unique_ptr<HeadlessWebContents> CreateWebContents(
++      const GURL& initial_url,
+       const gfx::Size& size) = 0;
+ 
+   // Returns a task runner for submitting work to the browser main thread.
+Index: headless/public/headless_web_contents.h
+diff --git a/headless/public/headless_web_contents.h b/headless/public/headless_web_contents.h
+index e3cfbfb3ad86b98c5438497d0658746f8062f3a1..04ac953001d61b94e9d9bab75de4ea1a931ef0fa 100644
+--- a/headless/public/headless_web_contents.h
++++ b/headless/public/headless_web_contents.h
+@@ -22,9 +22,13 @@ class HEADLESS_EXPORT HeadlessWebContents {
+   // TODO(skyostil): Replace this with an equivalent client API.
+   class Observer {
+    public:
+-    // Will be called on browser thread.
+-    virtual void DocumentOnLoadCompletedInMainFrame() = 0;
+-    virtual void DidFinishNavigation(bool success) = 0;
++    // All the following notifications will be called on browser main thread.
++    virtual void DocumentOnLoadCompletedInMainFrame(){};
++    virtual void DidFinishNavigation(bool success){};
++
++    // After this event, this HeadlessWebContents instance is ready to be
++    // controlled using a DevTools client.
++    virtual void WebContentsReady(){};
+ 
+    protected:
+     Observer() {}
+@@ -34,9 +38,6 @@ class HEADLESS_EXPORT HeadlessWebContents {
+     DISALLOW_COPY_AND_ASSIGN(Observer);
+   };
+ 
+-  // TODO(skyostil): Replace this with an equivalent client API.
+-  virtual bool OpenURL(const GURL& url) = 0;
+-
+   // Add or remove an observer to receive events from this WebContents.
+   // |observer| must outlive this class or be removed prior to being destroyed.
+   virtual void AddObserver(Observer* observer) = 0;
+Index: headless/test/headless_browser_test.cc
+diff --git a/headless/test/headless_browser_test.cc b/headless/test/headless_browser_test.cc
+index 61d4551e5944fdda4320caf7de632d00e4f92bf7..05257825cb02614227c12ffbac85910a8e1984f6 100644
+--- a/headless/test/headless_browser_test.cc
++++ b/headless/test/headless_browser_test.cc
+@@ -5,6 +5,7 @@
+ #include "headless/test/headless_browser_test.h"
+ 
+ #include "base/files/file_path.h"
++#include "base/memory/ptr_util.h"
+ #include "base/message_loop/message_loop.h"
+ #include "base/run_loop.h"
+ #include "content/public/browser/browser_thread.h"
+@@ -18,9 +19,9 @@ namespace {
+ 
+ class WaitForNavigationObserver : public HeadlessWebContents::Observer {
+  public:
+-  WaitForNavigationObserver(base::RunLoop* run_loop,
++  WaitForNavigationObserver(HeadlessBrowserTest* browser_test,
+                             HeadlessWebContents* web_contents)
+-      : run_loop_(run_loop),
++      : browser_test_(browser_test),
+         web_contents_(web_contents),
+         navigation_succeeded_(false) {
+     web_contents_->AddObserver(this);
+@@ -28,7 +29,9 @@ class WaitForNavigationObserver : public HeadlessWebContents::Observer {
+ 
+   ~WaitForNavigationObserver() override { web_contents_->RemoveObserver(this); }
+ 
+-  void DocumentOnLoadCompletedInMainFrame() override { run_loop_->Quit(); }
++  void DocumentOnLoadCompletedInMainFrame() override {
++    browser_test_->FinishAsynchronousTest();
++  }
+   void DidFinishNavigation(bool success) override {
+     navigation_succeeded_ = success;
+   }
+@@ -36,7 +39,7 @@ class WaitForNavigationObserver : public HeadlessWebContents::Observer {
+   bool navigation_succeeded() const { return navigation_succeeded_; }
+ 
+  private:
+-  base::RunLoop* run_loop_;            // Not owned.
++  HeadlessBrowserTest* browser_test_;  // Not owned.
+   HeadlessWebContents* web_contents_;  // Not owned.
+ 
+   bool navigation_succeeded_;
+@@ -86,18 +89,22 @@ HeadlessBrowser* HeadlessBrowserTest::browser() const {
+   return HeadlessContentMainDelegate::GetInstance()->browser();
+ }
+ 
+-bool HeadlessBrowserTest::NavigateAndWaitForLoad(
+-    HeadlessWebContents* web_contents,
+-    const GURL& url) {
+-  base::RunLoop run_loop;
++bool HeadlessBrowserTest::WaitForLoad(HeadlessWebContents* web_contents) {
++  WaitForNavigationObserver observer(this, web_contents);
++  RunAsynchronousTest();
++  return observer.navigation_succeeded();
++}
++
++void HeadlessBrowserTest::RunAsynchronousTest() {
+   base::MessageLoop::ScopedNestableTaskAllower nestable_allower(
+       base::MessageLoop::current());
+-  WaitForNavigationObserver observer(&run_loop, web_contents);
++  run_loop_ = base::WrapUnique(new base::RunLoop());
++  run_loop_->Run();
++  run_loop_ = nullptr;
++}
+ 
+-  if (!web_contents->OpenURL(url))
+-    return false;
+-  run_loop.Run();
+-  return observer.navigation_succeeded();
++void HeadlessBrowserTest::FinishAsynchronousTest() {
++  run_loop_->Quit();
+ }
+ 
+ }  // namespace headless
+Index: headless/test/headless_browser_test.h
+diff --git a/headless/test/headless_browser_test.h b/headless/test/headless_browser_test.h
+index f46fb90ba60c74f6867b391d9008f3da5d4bf88c..f4875a217c464a7189d7c6116ddd0c8d5591fdba 100644
+--- a/headless/test/headless_browser_test.h
++++ b/headless/test/headless_browser_test.h
+@@ -5,14 +5,24 @@
+ #ifndef HEADLESS_TEST_HEADLESS_BROWSER_TEST_H_
+ #define HEADLESS_TEST_HEADLESS_BROWSER_TEST_H_
+ 
++#include <memory>
+ #include "content/public/test/browser_test_base.h"
+ #include "headless/public/headless_browser.h"
+ 
++namespace base {
++class RunLoop;
++}
++
+ namespace headless {
+ class HeadlessWebContents;
+ 
+ // Base class for tests which require a full instance of the headless browser.
+ class HeadlessBrowserTest : public content::BrowserTestBase {
++ public:
++  // Notify that an asynchronous test is now complete and the test runner should
++  // exit.
++  void FinishAsynchronousTest();
++
+  protected:
+   HeadlessBrowserTest();
+   ~HeadlessBrowserTest() override;
+@@ -27,15 +37,20 @@ class HeadlessBrowserTest : public content::BrowserTestBase {
+   // pumps) cannot be set via this method.
+   void SetBrowserOptions(const HeadlessBrowser::Options& options);
+ 
+-  // Navigate to |url| and wait for the document load to complete.
+-  bool NavigateAndWaitForLoad(HeadlessWebContents* web_contents,
+-                              const GURL& url);
++  // Run an asynchronous test in a nested run loop. The caller should call
++  // FinishAsynchronousTest() to notify that the test should finish.
++  void RunAsynchronousTest();
++
++  // Synchronously waits for a tab to finish loading.
++  bool WaitForLoad(HeadlessWebContents* web_contents);
+ 
+  protected:
+   // Returns the browser for the test.
+   HeadlessBrowser* browser() const;
+ 
+  private:
++  std::unique_ptr<base::RunLoop> run_loop_;
++
+   DISALLOW_COPY_AND_ASSIGN(HeadlessBrowserTest);
+ };
+ 
